@@ -11,13 +11,4 @@ RUN yum clean metadata \
     && rm -rf /usr/share/man/* \
     && rm -rf /usr/share/info/*
 
-RUN adduser \
-    --comment "RPM Builder" \
-    --home /home/rpmbuild \
-    --create-home \
-    rpmbuild
-
-USER rpmbuild
-WORKDIR /home/rpmbuild
-
 CMD ["/bin/bash"]
