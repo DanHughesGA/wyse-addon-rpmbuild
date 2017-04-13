@@ -8,8 +8,11 @@ RUN yum clean metadata \
     && package-cleanup --oldkernels --count=1 \
     && rm -rf /var/cache/*
 
-RUN useradd -m rpmbuild && \
-    echo "rpmbuild ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/rpmbuild
+RUN adduser \
+    --comment "RPM Builder" \
+    --home /home/rpmbuild \
+    --create-home \
+    rpmbuild
 
 USER rpmbuild
 WORKDIR /home/rpmbuild
