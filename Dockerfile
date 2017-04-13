@@ -6,7 +6,10 @@ RUN yum clean metadata \
     && yum -y update \
     && yum clean all \
     && package-cleanup --oldkernels --count=1 \
-    && rm -rf /var/cache/*
+    && rm -rf /var/cache/* \
+    && rm -rf /usr/share/doc/* \
+    && rm -rf /usr/share/man/* \
+    && rm -rf /usr/share/info/*
 
 RUN adduser \
     --comment "RPM Builder" \
