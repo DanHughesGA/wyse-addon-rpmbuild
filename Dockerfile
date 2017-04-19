@@ -12,6 +12,7 @@ RUN yum clean metadata \
     && rm -rf /usr/share/info/*
 
 COPY 11_3_rpm-to-squashrpm /usr/bin
+COPY SuSE-release /etc
 RUN chmod +x /usr/bin/11_3_rpm-to-squashrpm
 
 CMD ["/bin/bash"]
