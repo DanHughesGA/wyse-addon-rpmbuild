@@ -1,0 +1,219 @@
+#!/bin/bash
+
+#   rpm-to-squashrpm is a script for converting regular RPM addon files into
+#   mini-squash compressed RPMs.
+#
+#   This version was created from the SLETC version at
+#	usr/share/kiwi/image/system/suse-SLED-thinclient/rpm-to-squashrpm
+#   Aside from stylistic differences (e.g., `cmd` -vs- $(cmd) ) and some minor
+#   cleanups, the only substantive differences are that we don't append '-lite'
+#   to the package name when assigning the NAME variable; and the default URL
+#   has been changed from novell.com to wyse.com.
+#
+#   Requires:
+#	rpm2cpio		from the rpm RPM
+#	mksquashfs		from the squashfs RPM
+#
+#   Usage:
+#	$0 ${PACKAGE_NAME}-${VERSION}.${ARCH}.rpm
+#   E.g.
+#	rpm-to-squashrpm  mumble-1.2.3-4.5.6.i586.rpm
+# ---------------------------------------------------------------------------
+
+function queryPackage()
+{
+	#   NOTE: The quotes are necessary here to prevent word-splitting; which
+	#   would remove embedded NEWLINEs from multi-line responses.
+    local		val="$(rpm -q --queryformat "%{$2}\n" --package "$1" )"
+
+    if  [ "$val" = '(none)' ]  ; then
+        val=
+    fi
+
+	echo "${val}"
+}
+
+
+
+#   Ensure that the running kernel supports the squashfs filesystem
+lsmod | grep -w ^squashfs > /dev/null
+if [ ! $? ] ; then
+    echo 'Trying squashfs'
+    modprobe squashfs
+fi
+
+
+SPEC_FILE_TEMPLATE=$(mktemp)
+cat > $SPEC_FILE_TEMPLATE << EOF
+Name:           @NAME@
+BuildRequires:  rpm
+URL:            @URL@
+License:        @LICENSE@
+Group:          Other
+Autoreqprov:    off
+Version:        @VERSION@
+Release:        @RELEASE@
+Summary:        @SUMMARY@
+BuildArch:	@BUILDARCH@
+Source:         %{name}-%{version}-%{release}.tar.bz2
+BuildRoot:      %{name}-%{version}-root
+
+%description
+Squashed version of %{name}.
+@DESCRIPTION@
+
+%prep
+%setup -c
+
+%build
+touch *
+
+%install
+cp -a * %{buildroot}
+
+%clean
+rm -rf $RPM_BUILD_ROOT
+
+%files
+%defattr(-,root,root)
+/var/lib/addons/@NAME@.squash
+EOF
+
+if  [ $(id -u) != '0' ]  ; then
+    echo 'ERROR: You must be root' > /dev/stderr
+    exit 1
+fi
+
+if  [ -z "$1" ] ; then
+    echo 'ERROR: No RPM file was specified' > /dev/stderr
+    exit 1
+fi
+ORIG_RPM_FILE=$1
+
+if ! file $ORIG_RPM_FILE | grep RPM 2>&1 >/dev/null  ; then
+    echo "ERROR: $ORIG_RPM_FILE does not appear to be a RPM file" > /dev/stderr
+    exit 1
+fi
+
+NAME=$(queryPackage $ORIG_RPM_FILE NAME)
+URL=$(queryPackage $ORIG_RPM_FILE URL)
+LICENSE=$(queryPackage $ORIG_RPM_FILE LICENSE)
+VERSION=$(queryPackage $ORIG_RPM_FILE VERSION)
+RELEASE=$(queryPackage $ORIG_RPM_FILE RELEASE)
+SUMMARY=$(queryPackage $ORIG_RPM_FILE SUMMARY)
+DESCRIPTION=$(queryPackage $ORIG_RPM_FILE DESCRIPTION)
+SUSE_VERSION=$(perl -ne 'print $1 if /^VERSION *=\s*(\S*)/i;' /etc/SuSE-release)
+SUSE_PATCHLEVEL=$(perl -ne 'print $1 if /^PATCHLEVEL *=\s*(\S*)/i;' /etc/SuSE-release)
+if [ $SUSE_PATCHLEVEL -eq 0 ] ; then
+    BUILDARCH=sletc"$SUSE_VERSION"
+else
+    BUILDARCH=sletc"$SUSE_VERSION"sp"$SUSE_PATCHLEVEL"
+fi
+
+if  [ -z "$URL" ]  ; then
+    URL='http://www.gatwickairport.com'
+fi
+
+echo -n 'Repacking into squashfs...'
+
+SQUASHDIR=$(mktemp -d)
+INITDIR=$(mktemp -d)
+chmod u=rwx,go=rx $SQUASHDIR
+rpm2cpio $ORIG_RPM_FILE > $SQUASHDIR/$NAME.cpio
+
+pushd $SQUASHDIR &>/dev/null
+cpio -id < $NAME.cpio &>/dev/null
+find . -type d -exec chmod u=rwx,go=rx {} \; &>/dev/null
+popd &>/dev/null
+
+mv $SQUASHDIR/etc/init.d/* $INITDIR &>/dev/null
+rm -rf $SQUASHDIR/etc/init.d &>/dev/null
+
+rm -f $SQUASHDIR/$NAME.cpio
+mksquashfs $SQUASHDIR $NAME.squash &>/dev/null
+rm -rf $SQUASHDIR/*
+
+mkdir -p $SQUASHDIR/var/lib/addons
+mv $NAME.squash $SQUASHDIR/var/lib/addons
+RPM_ROOTS=var
+INITDIR_CONTENTS=$(ls $INITDIR)
+echo $INITDIR_CONTENTS
+if  [ -n "$INITDIR_CONTENTS" ]  ; then
+    mkdir -p $SQUASHDIR/etc/init.d
+    mv $INITDIR/* $SQUASHDIR/etc/init.d
+    RPM_ROOTS+=' etc'
+fi
+
+#FIXME: Doing this here means that there will also be a copy in the
+#	squashfs image!  See buildSquash for fix.
+#   Look for a file listing additional files to be bundled outside
+#   the squashfs image.
+if  [ -s ../UNSQUASHED ] ; then
+    for  F  in  $(grep -v '^#' ../UNSQUASHED)  ; do
+	mkdir --parents ${SQUASHDIR}/${F%/*}
+	cp --archive ../data/${F} ${SQUASHDIR}/${F}
+    done
+fi
+
+( cd $SQUASHDIR  &&  tar cfj $NAME-$VERSION-$RELEASE.tar.bz2 $RPM_ROOTS && cp -f $NAME-$VERSION-$RELEASE.tar.bz2 /root/rpmbuild/SOURCES )
+
+echo 'Done.'
+
+BUILD_ROOT=$(mktemp -d)
+SPEC_FILE="$NAME-$VERSION-$RELEASE.spec"
+
+sed -e "s/@NAME@/$NAME/g;"		\
+    -e "s!@URL@!$URL!g;"		\
+    -e "s^@LICENSE@^$LICENSE^g;"	\
+    -e "s/@VERSION@/$VERSION/g;"	\
+    -e "s/@RELEASE@/$RELEASE/g;"	\
+    -e "s#@SUMMARY@#$SUMMARY#g;"	\
+    -e "s#@DESCRIPTION@#$DESCRIPTION#g;"	\
+    -e "s#@BUILDARCH@#$BUILDARCH#g;"	\
+    < $SPEC_FILE_TEMPLATE > $SPEC_FILE
+
+if  [ -n "$INITDIR_CONTENTS" ]  ; then
+    echo "/etc/init.d/*" >> $SPEC_FILE
+    [ -s ../UNSQUASHED ]  &&  grep -v '^#' ../UNSQUASHED >> $SPEC_FILE
+fi
+
+#   NOTE: the following rpm commands can be replaced by cleaner calls to
+#   the queryPackage function - see buildSquash for a similar case..
+echo -e "%pre\n" >> $SPEC_FILE
+rpm -qp --queryformat "%{PREIN}\n" $ORIG_RPM_FILE | grep -v '^(none)$' >> $SPEC_FILE
+
+echo -e "%post\nsquash-merge -m $NAME || true\n\n" >> $SPEC_FILE
+rpm -qp --queryformat "%{POSTIN}\n" $ORIG_RPM_FILE | grep -v '^(none)$' >> $SPEC_FILE
+
+echo -e "%preun\n" >> $SPEC_FILE
+rpm -qp --queryformat "%{PREUN}\n" $ORIG_RPM_FILE | grep -v '^(none)$' >> $SPEC_FILE
+echo -e "\nsquash-merge --unmerge $NAME || true\n" >> $SPEC_FILE
+
+echo -e "%postun\n" >> $SPEC_FILE
+rpm -qp --queryformat "%{POSTUN}\n" $ORIG_RPM_FILE | grep -v '^(none)$' >> $SPEC_FILE
+
+# cp --force --link $SQUASHDIR/$NAME-$VERSION-$RELEASE.tar.bz2 /usr/src/packages/SOURCES
+# cp --force --link $SPEC_FILE /usr/src/packages/SPECS
+
+echo -n 'Running RPM build...'
+echo "buildarch_compat: i586:  $BUILDARCH" > ~/.rpmrc
+if ! setarch i686 rpmbuild -bb $SPEC_FILE &> /tmp/rpm-to-squashrpm.log ; then
+    echo
+    echo 'ERROR: rpm build failed.  See /tmp/rpm-to-squashrpm.log for details.' > /dev/stderr
+    exit 1
+fi
+rm ~/.rpmrc
+echo "Done."
+
+
+rm -rf $SQUASHDIR
+rm -rf $INITDIR
+rm -f $SPEC_FILE
+rm -f $SPEC_FILE_TEMPLATE
+
+# cp --force --link /usr/src/packages/RPMS/$BUILDARCH/$NAME-$VERSION-$RELEASE.$BUILDARCH.rpm .
+# cp --force --link /usr/src/packages/SPECS/$NAME-$VERSION-$RELEASE.spec .
+# cp --force --link /usr/src/packages/SOURCES/$NAME-$VERSION-$RELEASE.tar.bz2 .
+
+echo ''
+echo "Successfully created $NAME-$VERSION-$RELEASE.$BUILDARCH.rpm"
